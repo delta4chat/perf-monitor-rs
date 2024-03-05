@@ -15,14 +15,28 @@ pub struct ProcessTimes {
 
 impl ProcessTimes {
     pub fn capture_current() -> Result<Self> {
-        unsafe { Self::capture_with_handle(GetCurrentProcess()) }
+        unsafe {
+            Self::capture_with_handle(
+                GetCurrentProcess()
+            )
+        }
     }
 
-    pub unsafe fn capture_with_handle(handle: HANDLE) -> Result<Self> {
-        let mut create = MaybeUninit::<FILETIME>::uninit();
-        let mut exit = MaybeUninit::<FILETIME>::uninit();
-        let mut kernel = MaybeUninit::<FILETIME>::uninit();
-        let mut user = MaybeUninit::<FILETIME>::uninit();
+    pub unsafe fn capture_with_handle(handle: HANDLE)
+        -> Result<Self>
+    {
+        let mut create =
+            MaybeUninit::<FILETIME>::uninit();
+
+        let mut exit =
+            MaybeUninit::<FILETIME>::uninit();
+
+        let mut kernel =
+            MaybeUninit::<FILETIME>::uninit();
+
+        let mut user =
+            MaybeUninit::<FILETIME>::uninit();
+
         let ret = unsafe {
             GetProcessTimes(
                 handle,

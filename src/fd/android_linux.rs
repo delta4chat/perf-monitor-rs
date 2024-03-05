@@ -1,11 +1,25 @@
-pub fn fd_count_pid(pid: u32) -> std::io::Result<usize> {
-    // Subtract 2 to exclude `.`, `..` entries
-    std::fs::read_dir(format!("/proc/{}/fd", pid)).map(|entries| entries.count().saturating_sub(2))
+use procfs::process::Process;
+
+#[inline]
+pub fn fd_count_pid<T: Into<u32>>(pid: T)
+    -> anyhow::Result<usize>
+{
+    let pid: u32 = pid.into();
+
+    let pid: i32 = pid.try_into()?;
+    Ok(Process::new(pid)?.fd_count()?)
 }
 
+pub fn fd_count_current() -> anyhow::Result<usize> {
+    Ok(Process::myself()?.fd_count()?)
+}
+
+#[deprecated]
 pub fn fd_count_cur() -> std::io::Result<usize> {
-    // Subtract 3 to exclude `.`, `..` entries and fd created by `read_dir`
-    std::fs::read_dir("/proc/self/fd").map(|entries| entries.count().saturating_sub(3))
+    match fd_count_current() {
+        Ok(v) => Ok(v),
+        Err(e) => Err( std::io::Error::other(e) ),
+    }
 }
 
 #[cfg(test)]

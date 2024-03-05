@@ -18,8 +18,7 @@
 //! ## Other Process
 //!
 //! For windows, linux and android(maybe), it is possible to get fd number of other process.
-//! However we didn't re-export these function because macos and ios is not supported.
-//!
+// //! However we didn't re-export these function because macos and ios is not supported.
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -54,6 +53,18 @@ use darwin_private as platform;
 
 /// return the fd count of current process
 #[inline]
-pub fn fd_count_cur() -> std::io::Result<usize> {
-    platform::fd_count_cur().map(|count| count as usize)
+pub fn fd_count_current() -> anyhow::Result<usize> {
+    Ok(
+        platform::fd_count_current()
+        .map(|count| { count as usize })?
+    )
 }
+
+#[deprecated]
+pub fn fd_count_cur() -> std::io::Result<usize> {
+    match fd_count_current() {
+        Ok(v) => Ok(v),
+        Err(e) => Err( std::io::Error::other(e) ),
+    }
+}
+

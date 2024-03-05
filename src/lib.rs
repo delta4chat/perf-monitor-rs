@@ -10,17 +10,32 @@
 extern crate test;
 
 #[allow(warnings)]
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_vendor="apple")]
 pub(crate) mod bindings {
-    include!(concat!(env!("OUT_DIR"), "/monitor_rs_ios_macos_binding.rs"));
+    pub use mach_sys::*;
 }
+/*
+pub(crate) mod bindings {
+    include!(
+        concat!(
+            env!("OUT_DIR"),
+            "/monitor_rs_ios_macos_binding.rs"
+        )
+    );
+}*/
 
 pub mod cpu;
+pub use cpu::*;
 
 pub mod mem;
+pub use mem::*;
 
 pub mod io;
+pub use io::*;
 
 pub mod fd;
+pub use fd::*;
 
 mod utils;
+use utils::*;
+

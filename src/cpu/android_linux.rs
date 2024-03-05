@@ -1,95 +1,225 @@
-use libc::{pthread_t, timespec};
-use std::{
-    convert::TryInto,
-    io::Error,
-    io::Result,
-    mem::MaybeUninit,
-    time::{Duration, Instant},
-};
 
-#[derive(Clone, Copy)]
-pub struct ThreadId(pthread_t);
+use core::convert::TryInto;
+use core::cell::Cell;
+use core::time::Duration;
 
+use std::time::Instant;
+
+use procfs::process::{Process, Task, Stat};
+use procfs::{CpuInfo, ticks_per_second};
+
+use once_cell::sync::Lazy;
+
+pub static TICKS_PER_SECOND: Lazy<u64> =
+    Lazy::new(ticks_per_second);
+
+pub static CPU_INFO: Lazy<CpuInfo> =
+    Lazy::new(|| {
+        use procfs::Current;
+        CpuInfo::current()
+            .expect("cannot get /proc/cpuinfo")
+    });
+
+pub fn current_process() -> anyhow::Result<Process> {
+    Ok(Process::myself()?)
+}
+pub fn current_task() -> anyhow::Result<Task> {
+    let tid: i32 = ThreadId::current().into();
+    Ok(current_process()?.task_from_tid(tid)?)
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ThreadId(rustix::thread::Pid);
+
+impl From<ThreadId> for i32 {
+    fn from(val: ThreadId) -> i32 {
+        val.0.as_raw_nonzero().get()
+    }
+}
 impl ThreadId {
     #[inline]
     pub fn current() -> Self {
-        ThreadId(unsafe { libc::pthread_self() })
+        ThreadId( rustix::thread::gettid() )
     }
 }
 
-fn timespec_to_duration(timespec { tv_sec, tv_nsec }: timespec) -> Duration {
-    let sec: u64 = tv_sec.try_into().unwrap_or_default();
-    let nsec: u64 = tv_nsec.try_into().unwrap_or_default();
-    let (sec, nanos) = (
-        sec.saturating_add(nsec / 1_000_000_000),
-        (nsec % 1_000_000_000) as u32,
-    );
-    Duration::new(sec, nanos)
+fn get_thread_stat(tid: ThreadId)
+    -> anyhow::Result<Stat>
+{
+    let task =
+        current_process()?
+        .task_from_tid( tid.into() )?;
+
+    let stat = task.stat()?;
+    Ok(stat)
 }
 
-fn get_thread_cputime(ThreadId(thread): ThreadId) -> Result<timespec> {
-    let mut clk_id = 0;
-    let ret = unsafe { libc::pthread_getcpuclockid(thread, &mut clk_id) };
-    if ret != 0 {
-        return Err(Error::from_raw_os_error(ret));
+fn get_thread_cputime(tid: ThreadId)
+    -> anyhow::Result<Duration>
+{
+    let stat = get_thread_stat(tid)?;
+    get_stat_cputime(stat)
+}
+
+enum Ticks {
+    U64(u64),
+    I64(i64),
+}
+
+impl From<u64> for Ticks {
+    fn from(val: u64) -> Ticks {
+        Ticks::U64(val)
+    }
+}
+impl From<i64> for Ticks {
+    fn from(val: i64) -> Ticks {
+        Ticks::I64(val)
+    }
+}
+
+impl From<Ticks> for f64 {
+    fn from(val: Ticks) -> f64 {
+        use Ticks::*;
+        match val {
+            U64(u) => { u as f64 }
+            I64(i) => { i as f64 }
+        }
+    }
+}
+
+fn ticks_to_seconds<T: Into<Ticks>>(ticks: T)
+    -> anyhow::Result<f64>
+{
+    let ticks: Ticks = ticks.into();
+    let ticks: f64 = ticks.into();
+
+    let tps: u64 = *TICKS_PER_SECOND;
+    if tps == 0 {
+        anyhow::bail!("unexpected zero value of TICKS_PER_SECOND");
     }
 
-    let mut timespec = MaybeUninit::<timespec>::uninit();
-    let ret = unsafe { libc::clock_gettime(clk_id, timespec.as_mut_ptr()) };
-    if ret != 0 {
-        return Err(Error::last_os_error());
+    Ok(  ticks / (tps as f64)  )
+}
+fn get_stat_cputime(stat: Stat)
+    -> anyhow::Result<Duration>
+{
+    let utime = ticks_to_seconds(stat.utime)?;
+    let stime = ticks_to_seconds(stat.stime)?;
+    let cutime = ticks_to_seconds(stat.cutime)?;
+    let cstime = ticks_to_seconds(stat.cstime)?;
+
+    let total_cputime = utime + stime + cutime + cstime;
+    if total_cputime < 0.0 {
+        anyhow::bail!(
+            "cputime({}) should not a negative number!",
+            total_cputime,
+        );
     }
-    Ok(unsafe { timespec.assume_init() })
+
+    Ok(Duration::from_secs_f64( total_cputime.abs() ))
 }
 
 pub struct ThreadStat {
     tid: ThreadId,
-    last_stat: (timespec, Instant),
+    last_stat: Cell<(Duration, Instant)>,
 }
 
-impl ThreadStat {
-    pub fn cur() -> Result<Self> {
-        Self::build(ThreadId::current())
-    }
+impl TryFrom<ThreadId> for ThreadStat {
+    type Error = anyhow::Error;
 
-    pub fn build(tid: ThreadId) -> Result<Self> {
+    fn try_from(tid: ThreadId)
+        -> anyhow::Result<ThreadStat>
+    {
         let cputime = get_thread_cputime(tid)?;
         let total_time = Instant::now();
         Ok(ThreadStat {
             tid,
-            last_stat: (cputime, total_time),
+            last_stat: Cell::new((cputime, total_time)),
         })
+    }
+}
+impl ThreadStat {
+    pub fn current() -> anyhow::Result<Self> {
+        ThreadId::current().try_into()
+    }
+
+    #[deprecated]
+    pub fn cur() -> std::io::Result<Self> {
+        match Self::current() {
+            Ok(v) => Ok(v),
+            Err(e) => Err( std::io::Error::other(e) ),
+        }
+    }
+
+    #[deprecated]
+    pub fn build(tid: ThreadId)-> std::io::Result<Self>{
+        match tid.try_into() {
+            Ok(v) => Ok(v),
+            Err(e) => Err( std::io::Error::other(e) ),
+        }
     }
 
     /// un-normalized
-    pub fn cpu(&mut self) -> Result<f64> {
+    pub fn cpu_usage(&self) -> anyhow::Result<f64> {
         let cputime = get_thread_cputime(self.tid)?;
         let total_time = Instant::now();
+
         let (old_cputime, old_total_time) =
-            std::mem::replace(&mut self.last_stat, (cputime, total_time));
-        let cputime = cputime.tv_sec as f64 + cputime.tv_nsec as f64 / 1_000_000_000f64;
-        let old_cputime = old_cputime.tv_sec as f64 + old_cputime.tv_nsec as f64 / 1_000_000_000f64;
-        let dt_cputime = cputime - old_cputime;
-        let dt_total_time = total_time
+            self.last_stat.replace(
+                (cputime, total_time)
+            );
+
+
+        let dt_cputime_f64: f64 =
+            if cputime >= old_cputime {
+                (cputime - old_cputime)
+                .as_secs_f64()
+            } else {
+                let t =
+                    (old_cputime - cputime)
+                    .as_secs_f64();
+                -t
+            };
+
+        let dt_total_time_f64: f64 =
+            total_time
             .saturating_duration_since(old_total_time)
             .as_secs_f64();
-        Ok(dt_cputime / dt_total_time)
+
+        Ok(dt_cputime_f64 / dt_total_time_f64)
     }
 
-    pub fn cpu_time(&mut self) -> Result<Duration> {
+    #[deprecated]
+    pub fn cpu(&self) -> std::io::Result<f64> {
+        match self.cpu_usage() {
+            Ok(v) => Ok(v),
+            Err(e) => Err( std::io::Error::other(e) ),
+        }
+    }
+
+    pub fn cpu_time(&self) -> anyhow::Result<Duration> {
         let cputime = get_thread_cputime(self.tid)?;
         let total_time = Instant::now();
         let (old_cputime, _old_total_time) =
-            std::mem::replace(&mut self.last_stat, (cputime, total_time));
-        Ok(timespec_to_duration(cputime).saturating_sub(timespec_to_duration(old_cputime)))
+            self.last_stat.replace(
+                (cputime, total_time)
+            );
+
+        Ok( cputime.saturating_sub(old_cputime) )
     }
 }
 
-pub fn cpu_time() -> Result<Duration> {
-    let mut timespec = MaybeUninit::<timespec>::uninit();
-    let ret = unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, timespec.as_mut_ptr()) };
-    if ret != 0 {
-        return Err(Error::last_os_error());
-    }
-    Ok(timespec_to_duration(unsafe { timespec.assume_init() }))
+/// get cpu time of provided PID.
+pub fn process_cputime<T: Into<i32>>(pid: T)
+    -> anyhow::Result<Duration>
+{
+    let stat = Process::new(pid.into())?.stat()?;
+    get_stat_cputime(stat)
 }
+
+/// get cpu time of current process.
+pub fn cpu_time() -> anyhow::Result<Duration> {
+    let stat = current_process()?.stat()?;
+    get_stat_cputime(stat)
+}
+

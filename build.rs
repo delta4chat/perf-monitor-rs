@@ -1,4 +1,4 @@
-#![allow(clippy::all, clippy::restriction, clippy::style, clippy::perf)]
+//#![allow(clippy::all, clippy::restriction, clippy::style, clippy::perf)]
 use std::{convert::AsRef, env, ffi::OsStr, path::Path, process::Command};
 
 /// Using `build.rs` to generate bindings to eliminate the difference
@@ -45,11 +45,14 @@ use std::{convert::AsRef, env, ffi::OsStr, path::Path, process::Command};
 /// ```
 
 fn main() {
-    let target_os = env::var("CARGO_CFG_TARGET_OS");
-    if target_os != Ok("macos".into()) && target_os != Ok("ios".into()) {
+    if ! cfg!(feature="darwin_bindgen") {
+        return;
+    }
+    if ! cfg!(target_vendor="apple") {
         return;
     }
 
+    let target_os = env::var("CARGO_CFG_TARGET_OS");
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH");
 
     fn build_include_path(sdk: impl AsRef<OsStr>) -> String {

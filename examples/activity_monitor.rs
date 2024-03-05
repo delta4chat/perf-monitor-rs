@@ -1,12 +1,12 @@
-use std::time::Duration;
+use core::time::Duration;
 use std::time::Instant;
 
-use perf_monitor::cpu::processor_numbers;
-use perf_monitor::cpu::ProcessStat;
-use perf_monitor::cpu::ThreadStat;
-use perf_monitor::fd::fd_count_cur;
-use perf_monitor::io::get_process_io_stats;
-use perf_monitor::mem::get_process_memory_info;
+use perfmon::cpu::processor_numbers;
+use perfmon::cpu::ProcessStat;
+use perfmon::cpu::ThreadStat;
+use perfmon::fd::fd_count_cur;
+use perfmon::io::get_process_io_stats;
+use perfmon::mem::get_process_memory_info;
 
 fn main() {
     build_some_threads();
@@ -27,7 +27,7 @@ fn main() {
         println!("----------");
 
         // cpu
-        let _ = (0..1_000).into_iter().sum::<i128>();
+        //let _ = (0..1_000).into_iter().sum::<i128>();
 
         let usage_p = stat_p.cpu().unwrap() * 100f64;
         let usage_t = stat_t.cpu().unwrap() * 100f64;
@@ -61,9 +61,24 @@ fn main() {
 }
 
 fn build_some_threads() {
-    for _ in 0..5 {
-        std::thread::spawn(|| loop {
-            let _ = (0..9_000).into_iter().sum::<i128>();
+    for i in 0..8 {
+        std::thread::spawn(move || {
+            let t_stat = ThreadStat::current().unwrap();
+            loop {
+                println!("{i} cpu usage: {:?}", t_stat.cpu());
+                if fastrand::u8(..) % 4 == 0
+                    && i%2 == 0 {
+                    println!("{i} sleeping");
+                    std::thread::sleep(
+                        Duration::from_secs(1)
+                    );
+                    continue;
+                }
+
+                println!("{i} started");
+                let _ = (0..(i as u128)+(u32::MAX / 400) as u128).into_iter().sum::<u128>();
+                println!("{i} exited");
+            }
         });
     }
 }

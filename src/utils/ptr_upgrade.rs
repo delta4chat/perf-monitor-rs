@@ -1,4 +1,4 @@
-use std::num::NonZeroIsize;
+use core::num::NonZeroIsize;
 
 /// Triage a return value of windows handle to `Some(handle)` or `None`
 pub trait HandleUpgrade: Sized {

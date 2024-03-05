@@ -1,8 +1,11 @@
-use std::io::Error;
-use std::io::Result;
-use std::mem::MaybeUninit;
-use windows_sys::Win32::Foundation::FILETIME;
-use windows_sys::Win32::System::Threading::GetSystemTimes;
+use core::mem::MaybeUninit;
+
+use std::io::{Error, Result};
+
+use windows_sys::Win32::{
+    Foundation::FILETIME,
+    System::Threading::GetSystemTimes,
+};
 
 pub struct SystemTimes {
     pub idle: FILETIME,
@@ -12,14 +15,28 @@ pub struct SystemTimes {
 
 impl SystemTimes {
     pub fn capture() -> Result<Self> {
-        let mut idle = MaybeUninit::<FILETIME>::uninit();
-        let mut kernel = MaybeUninit::<FILETIME>::uninit();
-        let mut user = MaybeUninit::<FILETIME>::uninit();
+        let mut idle =
+            MaybeUninit::<FILETIME>::uninit();
+
+        let mut kernel =
+            MaybeUninit::<FILETIME>::uninit();
+
+        let mut user =
+            MaybeUninit::<FILETIME>::uninit();
+
         let ret =
-            unsafe { GetSystemTimes(idle.as_mut_ptr(), kernel.as_mut_ptr(), user.as_mut_ptr()) };
+            unsafe {
+                GetSystemTimes(
+                    idle.as_mut_ptr(),
+                    kernel.as_mut_ptr(),
+                    user.as_mut_ptr()
+                )
+            };
+
         if ret == 0 {
             return Err(Error::last_os_error());
         }
+
         Ok(unsafe {
             Self {
                 idle: idle.assume_init(),

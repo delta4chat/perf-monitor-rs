@@ -1,6 +1,14 @@
+#[deprecated]
 pub fn fd_count_cur() -> std::io::Result<usize> {
+    fd_count_current()
+}
+
+pub fn fd_count_current() -> anyhow::Result<usize> {
     // Remove the opening fd created by `read_dir`
-    std::fs::read_dir("/dev/fd").map(|entries| entries.count().saturating_sub(1))
+    std::fs::read_dir("/dev/fd")
+        .map(|entries| {
+            entries.count().saturating_sub(1)
+        })
 }
 
 #[cfg(test)]

@@ -46,76 +46,125 @@ use ios_macos as platform;
 use windows as platform;
 
 pub use platform::{cpu_time, ThreadId};
-pub use std::io::Result;
-use std::{
-    io, mem,
-    time::{Duration, Instant},
-};
+
+use core::time::Duration;
+use core::cell::Cell;
+
+use std::time::Instant;
 
 /// logical processor number
 pub fn processor_numbers() -> std::io::Result<usize> {
-    std::thread::available_parallelism().map(|x| x.get())
+    Ok( num_cpus::get() )
+
+    // (this function only returns "current running CPU cores", not "all of exists CPUs". in most ARM/ARM64 devices, some cores may sleeping/woke for battery saving)
+
+    /*
+    std::thread::available_parallelism()
+        .map(|x| { x.get() })
+    */
 }
 
 /// A struct to monitor process cpu usage
 pub struct ProcessStat {
-    now: Instant,
-    cpu_time: Duration,
+    pid: u32,
+    last_stat: Cell<(Duration, Instant)>,
 }
 
 impl ProcessStat {
     /// return a monitor of current process
-    pub fn cur() -> io::Result<Self> {
+    pub fn current() -> anyhow::Result<Self> {
+        let cpu_time = platform::cpu_time()?;
+        let now = Instant::now();
         Ok(ProcessStat {
-            now: Instant::now(),
-            cpu_time: platform::cpu_time()?,
+            pid: std::process::id(),
+            last_stat: Cell::new( (cpu_time, now) ),
         })
+    }
+
+    #[deprecated]
+    pub fn cur() -> std::io::Result<Self> {
+        match Self::current() {
+            Ok(v) => Ok(v),
+            Err(e) => Err( std::io::Error::other(e) ),
+        }
     }
 
     /// return the cpu usage from last invoke,
     /// or when this struct created if it is the first invoke.
-    pub fn cpu(&mut self) -> io::Result<f64> {
-        let old_time = mem::replace(&mut self.cpu_time, platform::cpu_time()?);
-        let old_now = mem::replace(&mut self.now, Instant::now());
-        let real_time = self.now.saturating_duration_since(old_now).as_secs_f64();
-        let cpu_time = self.cpu_time.saturating_sub(old_time).as_secs_f64();
-        Ok(cpu_time / real_time)
+    pub fn cpu(&self) -> anyhow::Result<f64> {
+        let cpu_time = platform::cpu_time()?;
+        let now = Instant::now();
+
+        let (old_cpu_time, old_now) =
+            self.last_stat.replace(
+                (cpu_time, now)
+            );
+
+        let real_time: f64 =
+            now.saturating_duration_since(old_now)
+            .as_secs_f64();
+
+        let cpu_usage: f64 =
+            cpu_time.saturating_sub(old_cpu_time)
+            .as_secs_f64();
+
+        Ok(cpu_usage / real_time)
     }
 }
 
 /// A struct to monitor thread cpu usage
-pub struct ThreadStat {
-    stat: platform::ThreadStat,
-}
+pub struct ThreadStat(platform::ThreadStat);
 
+impl TryFrom<ThreadId> for ThreadStat {
+    type Error = anyhow::Error;
+
+    fn try_from(tid: ThreadId)
+        -> anyhow::Result<ThreadStat>
+    {
+        let stat: platform::ThreadStat =
+            tid.try_into()?;
+
+        Ok( ThreadStat(stat) )
+    }
+}
 impl ThreadStat {
     /// return a monitor of current thread.
-    pub fn cur() -> Result<Self> {
-        Ok(ThreadStat {
-            stat: platform::ThreadStat::cur()?,
-        })
+    pub fn current() -> anyhow::Result<Self> {
+        let stat = platform::ThreadStat::current()?;
+        Ok( Self(stat) )
+    }
+
+    #[deprecated]
+    pub fn cur() -> anyhow::Result<Self> {
+        Self::current()
     }
 
     /// return a monitor of specified thread.
     ///
     /// `tid` is **NOT** `std::thread::ThreadId`.
     /// [`ThreadId::current`] can be used to retrieve a valid tid.
-    pub fn build(thread_id: ThreadId) -> Result<Self> {
-        Ok(ThreadStat {
-            stat: platform::ThreadStat::build(thread_id)?,
-        })
+    #[deprecated]
+    pub fn build(tid: ThreadId) -> anyhow::Result<Self> {
+        tid.try_into()
     }
 
     /// return the cpu usage from last invoke,
     /// or when this struct created if it is the first invoke.
-    pub fn cpu(&mut self) -> Result<f64> {
-        self.stat.cpu()
+    pub fn cpu_usage(&self) -> anyhow::Result<f64> {
+        self.0.cpu_usage()
+    }
+
+    #[deprecated]
+    pub fn cpu(&self) -> std::io::Result<f64> {
+        self.0.cpu()
     }
 
     /// return the cpu_time in user mode and system mode from last invoke,
     /// or when this struct created if it is the first invoke.
-    pub fn cpu_time(&mut self) -> Result<Duration> {
-        self.stat.cpu_time()
+    pub fn cpu_time(&self)
+        -> anyhow::Result<Duration>
+    {
+        self.0.cpu_time()
     }
 }
 
@@ -127,7 +176,7 @@ mod test {
     #[test]
     #[ignore]
     fn test_process_usage() {
-        let mut stat = ProcessStat::cur().unwrap();
+        let stat = ProcessStat::current().unwrap();
 
         std::thread::sleep(std::time::Duration::from_secs(1));
 
@@ -142,7 +191,7 @@ mod test {
             });
         }
 
-        let mut stat = ProcessStat::cur().unwrap();
+        let stat = ProcessStat::current().unwrap();
 
         std::thread::sleep(std::time::Duration::from_secs(1));
 
@@ -153,7 +202,7 @@ mod test {
 
     #[test]
     fn test_thread_usage() {
-        let mut stat = ThreadStat::cur().unwrap();
+        let stat = ThreadStat::current().unwrap();
 
         std::thread::sleep(std::time::Duration::from_secs(1));
         let usage = stat.cpu().unwrap();

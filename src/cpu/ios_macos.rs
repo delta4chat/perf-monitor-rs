@@ -1,18 +1,32 @@
 use libc::{
-    mach_thread_self, rusage, thread_basic_info, time_value_t, KERN_SUCCESS, RUSAGE_SELF,
+    // functions
+    mach_thread_self, thread_info,
+
+    // structs, types, and constants
+    rusage, RUSAGE_SELF,
+
+    time_value_t, timeval,
+
+    KERN_SUCCESS,
+
+    thread_basic_info_t,
     THREAD_BASIC_INFO, THREAD_BASIC_INFO_COUNT,
 };
-use std::convert::TryInto;
-use std::mem::MaybeUninit;
-use std::time::Instant;
-use std::{
-    io::{Error, Result},
-    time::Duration,
-};
 
-#[derive(Clone, Copy)]
+use core::convert::TryInto;
+use core::mem::MaybeUninit;
+use core::time::Duration;
+
+use std::time::Instant;
+
+#[derive(Debug, Copy, Clone)]
 pub struct ThreadId(u32);
 
+impl From<ThreadId> for u32 {
+    fn from(val: ThreadId) -> u32 {
+        val.0
+    }
+}
 impl ThreadId {
     #[inline]
     pub fn current() -> Self {
@@ -20,94 +34,195 @@ impl ThreadId {
     }
 }
 
-fn get_thread_basic_info(ThreadId(tid): ThreadId) -> Result<thread_basic_info> {
-    let mut thread_basic_info = MaybeUninit::<thread_basic_info>::uninit();
-    let mut thread_info_cnt = THREAD_BASIC_INFO_COUNT;
+fn get_thread_basic_info(tid: ThreadId)
+    -> anyhow::Result<thread_basic_info_t>
+{
+    let mut basic_info =
+        MaybeUninit::<thread_basic_info_t>::uninit();
+
+    let mut basic_info_cnt =
+        THREAD_BASIC_INFO_COUNT;
 
     let ret = unsafe {
-        libc::thread_info(
-            tid,
+        thread_info(
+            tid.into(),
             THREAD_BASIC_INFO as u32,
-            thread_basic_info.as_mut_ptr() as *mut _,
-            &mut thread_info_cnt,
+            basic_info.as_mut_ptr() as *mut _,
+            &mut basic_info_cnt,
         )
     };
-    if ret != KERN_SUCCESS as i32 {
-        return Err(Error::from_raw_os_error(ret));
+
+    if ret != (KERN_SUCCESS as i32) {
+        return Err( Error::from_raw_os_error(ret) );
     }
-    Ok(unsafe { thread_basic_info.assume_init() })
+    Ok(unsafe { basic_info.assume_init() })
 }
 
+#[derive(Debug, Clone)]
 pub struct ThreadStat {
     tid: ThreadId,
-    stat: (thread_basic_info, Instant),
+    last_stat: Cell<(thread_basic_info_t, Instant)>,
+}
+
+impl TryFrom<ThreadId> for ThreadStat {
+    type Error = anyhow::Error;
+    fn try_from(tid: ThreadId)
+        -> anyhow::Result<Self>
+    {
+        let stat = get_thread_basic_info(tid)?;
+        let time = Instant::now();
+        Ok(ThreadStat {
+            tid,
+            last_stat: Cell::new( (stat, time) ),
+        })
+    }
 }
 
 impl ThreadStat {
-    pub fn cur() -> Result<Self> {
+    pub fn current() -> anyhow::Result<Self> {
         Self::build(ThreadId::current())
     }
 
-    pub fn build(tid: ThreadId) -> Result<Self> {
-        Ok(ThreadStat {
-            tid,
-            stat: (get_thread_basic_info(tid)?, Instant::now()),
-        })
+    #[deprecated]
+    pub fn cur() -> std::io::Result<Self> {
+        Self::current()
     }
 
-    /// unnormalized
-    pub fn cpu(&mut self) -> Result<f64> {
-        let cur_stat = get_thread_basic_info(self.tid)?;
-        let cur_time = Instant::now();
-        let (last_stat, last_time) = std::mem::replace(&mut self.stat, (cur_stat, cur_time));
-
-        let cur_user_time = time_value_to_u64(cur_stat.user_time);
-        let cur_sys_time = time_value_to_u64(cur_stat.system_time);
-        let last_user_time = time_value_to_u64(last_stat.user_time);
-        let last_sys_time = time_value_to_u64(last_stat.system_time);
-
-        let cpu_time_us = cur_user_time
-            .saturating_sub(last_user_time)
-            .saturating_add(cur_sys_time.saturating_sub(last_sys_time));
-
-        let dt_duration = cur_time.saturating_duration_since(last_time);
-        Ok(cpu_time_us as f64 / dt_duration.as_micros() as f64)
+    #[deprecated]
+    pub fn build(tid: ThreadId)
+        -> std::io::Result<Self>
+    {
+        tid.try_into()
     }
 
-    pub fn cpu_time(&mut self) -> Result<Duration> {
-        let cur_stat = get_thread_basic_info(self.tid)?;
-        let cur_time = Instant::now();
-        let (last_stat, _last_time) = std::mem::replace(&mut self.stat, (cur_stat, cur_time));
+    /// un-normalized
+    pub fn cpu_usage(&self) -> anyhow::Result<f64> {
+        let stat = get_thread_basic_info(self.tid)?;
+        let now = Instant::now();
 
-        let cur_user_time = time_value_to_u64(cur_stat.user_time);
-        let cur_sys_time = time_value_to_u64(cur_stat.system_time);
-        let last_user_time = time_value_to_u64(last_stat.user_time);
-        let last_sys_time = time_value_to_u64(last_stat.system_time);
+        let (old_stat, old_now) =
+            self.last_stat.replace( (stat, now) );
 
-        let cpu_time_us = cur_user_time
-            .saturating_sub(last_user_time)
-            .saturating_add(cur_sys_time.saturating_sub(last_sys_time));
+        let utime =
+          time_value_to_duration(stat.user_time);
+        let stime =
+          time_value_to_duration(stat.system_time);
 
-        Ok(Duration::from_micros(cpu_time_us))
+        let old_utime =
+          time_value_to_duration(old_stat.user_time);
+        let old_stime =
+          time_value_to_duration(old_stat.system_time);
+
+        let dt_utime = utime.saturating_sub(old_utime);
+        let dt_stime = stime.saturating_sub(old_stime);
+
+        let dt_cputime_micros: u128 =
+            dt_utime.saturating_add(dt_stime)
+                    .as_micros();
+
+        let mut dt_duration_micros: u128 =
+            now.saturating_duration_since(old_now)
+                .as_micros();
+        if dt_duration_micros == 0 {
+            // this avoids "division by zero"
+            dt_duration_micros = 1;
+        }
+
+        Ok(
+            (dt_cputime_micros as f64)
+            /
+            (dt_duration_micros as f64)
+        )
+    }
+
+    #[deprecated]
+    pub fn cpu(&self) -> std::io::Result<f64> {
+        self.cpu_usage()
+    }
+
+    pub fn cpu_time(&self) -> anyhow::Result<Duration> {
+        let stat = get_thread_basic_info(self.tid)?;
+        let now = Instant::now();
+
+        let (old_stat, _old_now) =
+            self.last_stat.replace( (stat, now) );
+
+        let utime =
+          time_value_to_duration(stat.user_time);
+        let stime =
+          time_value_to_duration(stat.system_time);
+
+        let old_utime =
+          time_value_to_duration(old_stat.user_time);
+        let old_stime =
+          time_value_to_duration(old_stat.system_time);
+        
+        let dt_utime = utime.saturating_sub(old_utime);
+        let dt_stime = stime.saturating_sub(old_stime);
+
+        let dt_cputime: Duration =
+            dt_utime.saturating_add(dt_stime);
+
+        Ok(dt_cputime)
     }
 }
 
 #[inline]
-fn time_value_to_u64(t: time_value_t) -> u64 {
-    (t.seconds.try_into().unwrap_or(0u64))
-        .saturating_mul(1_000_000)
-        .saturating_add(t.microseconds.try_into().unwrap_or(0u64))
+fn time_value_to_duration(t: time_value_t) -> Duration {
+    let secs: Duration =
+        Duration::from_secs(
+            t.seconds.try_into().unwrap_or(0)
+        );
+
+    let sub_secs: Duration =
+        Duration::from_micros(
+            t.microseconds.try_into().unwrap_or(0)
+        );
+
+    secs.saturating_add(sub_secs)
 }
 
-pub fn cpu_time() -> Result<Duration> {
+#[inline]
+fn timeval_to_duration(t: timeval) -> Duration {
+    let secs: Duration =
+        Duration::from_secs(
+            t.tv_sec.try_into().unwrap_or(0)
+        );
+
+    let sub_secs: Duration =
+        Duration::from_nanos(
+            t.tv_nsec.try_into().unwrap_or(0)
+        );
+
+    secs.saturating_add(sub_secs)
+}
+
+#[deprecated]
+fn time_value_to_u64(tv: time_value_t) -> u64 {
+    time_value_to_duration(tv).as_micros() as u64
+}
+
+pub fn cpu_time() -> anyhow::Result<Duration> {
     let mut time = MaybeUninit::<rusage>::uninit();
-    let ret = unsafe { libc::getrusage(RUSAGE_SELF, time.as_mut_ptr()) };
+    let ret =
+        unsafe {
+            libc::getrusage(
+                RUSAGE_SELF,
+                time.as_mut_ptr()
+            )
+        };
+
     if ret != 0 {
         return Err(Error::last_os_error());
     }
+
     let time = unsafe { time.assume_init() };
-    let sec = (time.ru_utime.tv_sec as u64).saturating_add(time.ru_stime.tv_sec as u64);
-    let nsec = (time.ru_utime.tv_usec as u32)
+
+    let sec =
+        (time.ru_utime.tv_sec as u64)
+        .saturating_add(time.ru_stime.tv_sec as u64);
+    let nsec =
+        (time.ru_utime.tv_usec as u32)
         .saturating_add(time.ru_stime.tv_usec as u32)
         .saturating_mul(1000);
     Ok(Duration::new(sec, nsec))

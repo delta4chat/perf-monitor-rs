@@ -1,4 +1,4 @@
-use std::num::NonZeroIsize;
+use core::num::NonZeroIsize;
 use windows_sys::Win32::Foundation::CloseHandle;
 
 /// Windows handle wrapper
