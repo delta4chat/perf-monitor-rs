@@ -119,6 +119,7 @@ fn get_stat_cputime(stat: Stat)
     Ok(Duration::from_secs_f64( total_cputime.abs() ))
 }
 
+#[derive(Debug, Clone)]
 pub struct ThreadStat {
     tid: ThreadId,
     last_stat: Cell<(Duration, Instant)>,
