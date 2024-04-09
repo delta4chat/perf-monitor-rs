@@ -1,9 +1,10 @@
 //! A wrapper around libmalloc APIs.
 
-use crate::bindings::{
+use std::{io, str};
+
+use mach_sys::{
     mach_task_self_, malloc_default_zone, malloc_statistics_t, malloc_zone_t, vm_address_t,
 };
-use std::{io, str};
 
 /// A Wrapper around `malloc_statistics_t`, originally defined at `libmalloc.h`.
 pub type MallocStatistics = malloc_statistics_t;
