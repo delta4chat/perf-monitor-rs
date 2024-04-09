@@ -1,6 +1,6 @@
 [package]
 name = "perfmon"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["zhangli.pear <zhangli.pear@bytedance.com>", "Delta4 <delta4chat@gmx.com>"]
 edition = "2021"
 
